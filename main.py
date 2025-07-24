@@ -7,11 +7,11 @@ import os
 import json
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any
 from dotenv import load_dotenv
 
 from parse_documents import extract_candidate_profile, validate_profile
-from pdf_extractor import extract_cv_and_dice_texts
+from pdf_extractor import extract_cv_and_dice_texts, extract_text_from_pdf
 from interview_prompt import generate_interview_chat, validate_interview_data, format_chat_for_display
 from supabase_insert import insert_candidate_to_supabase
 
@@ -24,6 +24,87 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+def run_pipeline(name: str, email: str, cv_url: str, dice_url: str, push_supabase: bool = True, return_json: bool = False) -> Dict[str, Any]:
+    """
+    Main pipeline function for Railway API integration.
+    
+    Args:
+        name: Candidate name
+        email: Candidate email
+        cv_url: URL or path to CV PDF file
+        dice_url: URL or path to DICE test PDF file
+        push_supabase: Whether to push results to Supabase
+        return_json: Whether to return JSON response
+    
+    Returns:
+        Dictionary containing profile and interview data
+    """
+    try:
+        logger.info(f"Starting pipeline for candidate: {name}")
+        
+        # Step 1: Extract text from PDFs
+        logger.info("Extracting text from PDF files...")
+        cv_text = extract_text_from_pdf(cv_url)
+        dice_text = extract_text_from_pdf(dice_url)
+        
+        # Step 2: Extract structured profile data
+        logger.info("Extracting candidate profile data...")
+        profile_data = extract_candidate_profile(cv_text, dice_text)
+        
+        # Step 3: Validate the extracted profile
+        logger.info("Validating extracted profile...")
+        is_valid = validate_profile(profile_data)
+        
+        if not is_valid:
+            logger.warning("Profile validation failed - some fields may be missing")
+        
+        # Step 4: Generate interview conversation
+        logger.info("Generating personalized interview conversation...")
+        chat_data = generate_interview_chat(profile_data)
+        
+        if validate_interview_data(chat_data):
+            logger.info("Interview generated successfully")
+        else:
+            logger.warning("Interview generation failed")
+        
+        # Step 5: Push to Supabase if requested
+        if push_supabase:
+            logger.info("🔗 Pushing candidate data to Supabase...")
+            supabase_result = insert_candidate_to_supabase(
+                profile_data=profile_data,
+                chat_data=chat_data,
+                cv_url=cv_url,
+                dice_url=dice_url
+            )
+            
+            if supabase_result:
+                logger.info("✅ Successfully pushed to Supabase!")
+            else:
+                logger.warning("⚠️ Failed to push to Supabase - check credentials")
+        
+        # Step 6: Prepare response
+        result = {
+            "profile": profile_data,
+            "interview": chat_data,
+            "summary_notes": chat_data.get("summary_notes", ""),
+            "memories": chat_data.get("memories", []),
+            "status": "success"
+        }
+        
+        logger.info(f"Successfully processed documents for: {name}")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error in pipeline: {e}")
+        return {
+            "status": "error",
+            "error": str(e),
+            "profile": {},
+            "interview": {},
+            "summary_notes": "",
+            "memories": []
+        }
 
 class DocumentProcessor:
     """Main class for processing CV and DICE documents."""
